@@ -103,13 +103,26 @@ class BCDataset(Dataset):
                 
             df = pd.read_csv(csv_path)
             
-            # 画像パスを絶対パスに変換
-            def to_abs_path(p):
-                if not os.path.isabs(p):
-                    return os.path.join(demo_dir, p)
-                return p
+            # --- ▼ここからが修正▼ ---
+            # CSVに書かれたパスが絶対パスか相対パスかに関わらず、
+            # 強制的に「親フォルダ名/ファイル名」だけを抜き出す
+            def fix_path(p):
+                # p = "/home/sho/.../extracted_color_images/image_000.png" (古いPCの絶対パス)
+                try:
+                    parts = p.replace('\\', '/').split('/')
+                    # 最後の2要素 (例: "extracted_color_images", "image_000.png") を取得
+                    relative_part = os.path.join(parts[-2], parts[-1])
+                except Exception:
+                    # パスが変な場合 (例: "image_000.png" のみ)
+                    relative_part = os.path.basename(p)
+
+                # "demo_dir" (例: /home/gpu-server/.../1) と結合して
+                # "今いるPC" での正しい絶対パスを再構築する
+                return os.path.join(demo_dir, relative_part)
             
-            df['image_file'] = df['image_file'].apply(to_abs_path)
+            # 'fix_path' 関数を color_image 列に適用
+            df['image_file_color'] = df['image_file_color'].apply(fix_path)
+            # --- ▲ここまでが修正▲ ---
             
             # 必要な列が存在するかチェック
             if not all(col in df.columns for col in JOINT_NAMES):
