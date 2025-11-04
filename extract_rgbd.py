@@ -85,24 +85,36 @@ def extract_topic_data(bag_path, topic_name, image_save_dir=None):
                 print("⚠️ 'image_save_dir' must be provided for Image topics.")
                 continue
                 
-            # ★変更点: "bgr8" から "passthrough" に変更
-            # これにより、depth (16UC1など) も color (bgr8など) も
-            # 元のビット深度のまま正しくPNGとして保存される
+            # --- ★★★ ここが修正点 ★★★ ---
+            # デフォルトは "bgr8" (OpenCVが期待する形式) に変換
+            encoding_to_use = "bgr8"
+            
+            # ただし、Depth (16-bit int) や 32-bit float の場合は、
+            # 形式を変換せず「そのまま(passthrough)」渡す
+            if '16UC' in msg.encoding or '32FC' in msg.encoding:
+                 encoding_to_use = "passthrough"
+            # --- ★★★ 修正ここまで ★★★ ---
+
             try:
-                cv_img = bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+                cv_img = bridge.imgmsg_to_cv2(msg, desired_encoding=encoding_to_use)
             except Exception as e:
-                print(f"Error converting image: {e}")
+                print(f"Error converting image (original encoding: {msg.encoding}, desired: {encoding_to_use}): {e}")
                 continue
                 
             filename = f"image_{i:06d}.png"
             filepath = os.path.join(image_save_dir, filename)
-            cv2.imwrite(filepath, cv_img)
+            
+            try:
+                cv2.imwrite(filepath, cv_img)
+            except Exception as e:
+                print(f"Error saving image {filepath}: {e}")
+                continue
 
             data_list.append({
                 'time': time_sec,
                 'width': msg.width,
                 'height': msg.height,
-                'encoding': msg.encoding,
+                'encoding': msg_type.encoding if hasattr(msg_type, 'encoding') else msg.encoding, # 元のエンコーディングを記録
                 'image_file': filepath
             })
 
@@ -129,15 +141,19 @@ def extract_topic_data(bag_path, topic_name, image_save_dir=None):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python extract_bag_data.py <path_to_rosbag_folder>")
+    if len(sys.argv) != 3:
+        print("Usage: python extract.py <path_to_rosbag_folder> <path_to_output_folder>")
+        print("Example: python extract.py ./1 ./ext/1")
         sys.exit(1)
 
     bag_path = sys.argv[1] 
+    output_path = sys.argv[2] 
+    
+    os.makedirs(output_path, exist_ok=True)
     
     # --- 1. Joint States ---
     topic_joints = "/joint_states"
-    print(f"Extracting {topic_joints} ...")
+    print(f"Extracting {topic_joints} from {bag_path}...")
     joint_df = extract_topic_data(bag_path, topic_joints)
     if joint_df is None or joint_df.empty:
         print(f"⚠️ Failed to extract data from {topic_joints}. Exiting.")
@@ -146,80 +162,57 @@ if __name__ == "__main__":
     # --- 2. Color Image ---
     topic_color = "/devices/ee_camera/realsense_node/color/image_raw"
     print(f"Extracting {topic_color} ...")
-    image_save_dir_color = os.path.join(bag_path, "extracted_color_images")
+    image_save_dir_color = os.path.join(output_path, "extracted_color_images")
     color_df = extract_topic_data(bag_path, topic_color, image_save_dir_color)
     if color_df is None or color_df.empty:
         print(f"⚠️ Failed to extract data from {topic_color}. Exiting.")
         sys.exit(1)
 
-    # --- 3. Depth Image ---
-    topic_depth = "/devices/ee_camera/realsense_node/depth/image_rect_raw"
-    print(f"Extracting {topic_depth} ...")
-    image_save_dir_depth = os.path.join(bag_path, "extracted_depth_images")
-    depth_df = extract_topic_data(bag_path, topic_depth, image_save_dir_depth)
-    if depth_df is None or depth_df.empty:
-        print(f"⚠️ Failed to extract data from {topic_depth}. Exiting.")
-        sys.exit(1)
+    # --- 3. Depth Image (削除) ---
+    # (Depthの抽出処理を削除)
 
-    # --- マージ処理 ---
+    # --- マージ処理 (2つに修正) ---
     
-    data_frames_list = [joint_df, color_df, depth_df]
+    data_frames_list = [joint_df, color_df] # ★depth_df を削除
     
-    # 基準となる最小時間を全DFから計算
     try:
         all_min_time = min(df['time'].min() for df in data_frames_list)
     except ValueError:
         print("⚠️ Could not find minimum time from dataframes. Check if bags are empty.")
         sys.exit(1)
 
-    # 全てのDFで共通の基準時間から relative_time を計算
     for df in data_frames_list:
         df.sort_values("time", inplace=True)
         df['relative_time'] = df['time'] - all_min_time
 
-    # 3つのデータを time でマージ (joint_df をベースにする)
     print("Merging dataframes...")
     
-    # 1. joint_df をベースに color_df をマージ
+    # ★ 2つのDataFrame (joint_df と color_df) のみをマージ
     merged_df = pd.merge_asof(
         joint_df,
         color_df,
         on="time",
         direction="nearest",
         tolerance=0.02,  # 20ms (同期ズレの許容範囲: 必要に応じて調整)
-        suffixes=('_joint', '_color') # 衝突する列名 (relative_timeなど)
-    )
-    
-    # 2. 1の結果に depth_df をマージ
-    merged_df = pd.merge_asof(
-        merged_df,
-        depth_df,
-        on="time",
-        direction="nearest",
-        tolerance=0.02,  # 20ms (同期ズレの許容範囲: 必要に応じて調整)
-        suffixes=('', '_depth') 
-        # (例: color_df由来の 'width' は 'width', depth_df由来の 'width' は 'width_depth' になる)
+        suffixes=('_joint', '_color') 
     )
     
     merged_df.dropna(inplace=True) # マージできなかった行を削除
 
     if merged_df is not None and not merged_df.empty:
-        # 'time' (joint_df の time) を基準に 'relative_time' を再計算・上書き
         merged_df['relative_time'] = merged_df['time'] - all_min_time
         merged_df = merged_df.drop(columns=["time"])
 
-        # マージによって生じた不要な relative_time_* 列を削除
         other_rel_times = [c for c in merged_df.columns if c.startswith('relative_time_')]
         merged_df = merged_df.drop(columns=other_rel_times)
 
-        # relative_time を先頭に
         merged_df = merged_df[['relative_time'] + [c for c in merged_df.columns if c != 'relative_time']]
 
-        output_csv_path = os.path.join(bag_path, "joint_color_depth_merged.csv")
+        output_csv_path = os.path.join(output_path, "joint_color_merged.csv") # ★ファイル名を変更
         merged_df.to_csv(output_csv_path, index=False)
         print("---")
         print(f"✅ Merged data saved: {output_csv_path}")
         print(f"📸 Color images saved under: {image_save_dir_color}")
-        print(f"📸 Depth images saved under: {image_save_dir_depth}")
+        # ★ Depthのprint文を削除
     else:
         print("⚠️ Could not merge data. Check tolerance or bag contents.")

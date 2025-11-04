@@ -4,6 +4,9 @@
 # --------------------------
 # ROS Bagと抽出した全データ (extを含む)
 1015_imitation/
+ext/
+fine/
+
 # もし ext フォルダを 1015_imitation の外に作った場合
 # ext/
 
